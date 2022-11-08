@@ -1,13 +1,18 @@
-...
+from dotenv import load_dotenv
+import os
+from telegram import Bot
+import time
+import requests
+from pprint import pprint
 
 load_dotenv()
 
 
-PRACTICUM_TOKEN = ...
-TELEGRAM_TOKEN = ...
-TELEGRAM_CHAT_ID = ...
+PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-RETRY_TIME = 600
+RETRY_TIME = 5
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -55,28 +60,30 @@ def check_tokens():
 def main():
     """Основная логика работы бота."""
 
-    ...
+   
 
-    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    # bot = Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time())
 
-    ...
+    print(PRACTICUM_TOKEN)
+   
 
     while True:
         try:
-            response = ...
+            params={'from_date': 0}
+            response = requests.get(ENDPOINT, headers=HEADERS, params=params)
 
-            ...
-
-            current_timestamp = ...
+            current_timestamp = int(time.time())
+            pprint(response.json())
             time.sleep(RETRY_TIME)
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            ...
+
             time.sleep(RETRY_TIME)
         else:
-            ...
+            pass
+            
 
 
 if __name__ == '__main__':
