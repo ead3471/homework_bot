@@ -5,11 +5,13 @@ import time
 import requests
 from pprint import pprint
 import logging
-from exceptions import BadAPIResponseCode
+from exceptions import BadAPIResponseCode, APIRequestProcessingError, APIError, BadAPIResponseFormat, UncknownError
 from loggers import TelegramBotLogger
+from http import HTTPStatus
+from json import JSONDecodeError
+from schema import Schema, SchemaError
 
 load_dotenv()
-
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -27,13 +29,15 @@ HOMEWORK_STATUSES = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-logger:logging.Logger = logging.getLogger()
 
+logger:logging.Logger = logging.getLogger(__name__)
+
+homeworks_previous_data = {}
 
 def init_logger(logging_level:int, )->logging.Logger:
     """Logging initialization"""
     os.makedirs('logs', exist_ok=True)
-    logger = logging.getLogger('main_logger')
+    logger = logging.getLogger(__name__)
     logger.setLevel(logging_level)
     formatter = logging.Formatter('%(asctime)s, %(levelname)s, %(message)s')
     file_handler = logging.FileHandler(filename='logs/main.log', mode='w')
@@ -44,15 +48,16 @@ def init_logger(logging_level:int, )->logging.Logger:
     stream_handler.setFormatter(formatter)
     stream_handler.setLevel(logging_level)
 
-
-    telegram_logger = TelegramBotLogger(logging_level,Bot(token=TELEGRAM_TOKEN),123)
-    telegram_logger.setFormatter(formatter)
-
-
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
-    logger.addHandler(telegram_logger)
     return logger
+
+def init_telegram_logger(logging_level):
+    logger = logging.getLogger(__name__)
+    formatter = logging.Formatter('%(asctime)s, %(levelname)s, %(message)s')
+    telegram_logger = TelegramBotLogger(logging_level,Bot(token=TELEGRAM_TOKEN),TELEGRAM_CHAT_ID)
+    telegram_logger.setFormatter(formatter)
+    logger.addHandler(telegram_logger)
 
 
 def send_message(bot:Bot, message:str):
@@ -64,51 +69,97 @@ def send_message(bot:Bot, message:str):
     except TelegramError as error:
         logger.error(f'Sending message error:{error}')
 
-def get_api_answer(current_timestamp)->dict:
+def get_api_answer(current_timestamp:int = None)->dict:
     """Get homework status info"""
     timestamp = current_timestamp or int(time.time())
-    logger.debug(f"Process request to yandex API. timestamp={timestamp}")
+    logger.info(f"Process request to yandex API. timestamp={timestamp}")
     params = {'from_date': timestamp}
     try:
-        requests.get(ENDPOINT, headers=HEADERS, params=params).json()
+        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+        if response.status_code==HTTPStatus.OK:
+            result = response.json()
+            if 'error' in result:
+                raise APIError(f"Error at API response: {result.get('error')}")
+        else:
+            raise BadAPIResponseCode(f"Bad response code from yandex API:{response.status_code}")
     except requests.exceptions.RequestException as error:
-        logger.error(f"Process request error:{error}")
-        return None
-    else:
-        pass
-
-
-
-
-def check_response(response):
-
-    pass
-
-def parse_status(homework):
-    # homework_name = ...
-    # homework_status = ...
-
-   
-
-    # verdict = ...
-
+        raise APIRequestProcessingError(f"Process request error:{error}")
+    except JSONDecodeError or ValueError as error:
+        raise BadAPIResponseFormat(f'API response format error:{error}')
+    except Exception as error:
+        raise UncknownError(f'Uncknown error:{error}')
     
+    return result
 
-    # return f'Изменился статус проверки работы "{homework_name}". {verdict}'
-    pass
+def check_response(response:dict)->list:
+    if type(response) is not dict:
+        raise TypeError("Response is not a dict")
+    
+    if 'current_date' not in response or 'homeworks' not in response:
+        raise BadAPIResponseFormat(("Response should contain 'current_date'"
+                                   " and 'homeworks' keys"))
+    
+    if type(response['homeworks']) is not list:
+      raise TypeError("Homeworks is not a list")
+    
+    raw_homeworks = response['homeworks']
+    homeworks=[]
+    if raw_homeworks:
+        schema = Schema(
+            {'date_updated': str,
+                            'homework_name': str,
+                            'id': int,
+                            'lesson_name': int,
+                            'reviewer_comment': str,
+                            'status': str
+                        
+                    }
+        )
+        for homework in raw_homeworks:
+            try:
+               schema.is_valid(homework)
+               homeworks.append(homework)
+            except SchemaError as error:
+                logger.warning(f'Wrong homework data format:{error}')
+        return homeworks
+
+def parse_status(homework:dict)->str:
+    homework_name = homework['homework_name']
+    homework_status = homework['status']
+    verdict = HOMEWORK_STATUSES[homework_status]
+    status_is_changed =False
+
+    status_is_changed = (homework_name not in homeworks_previous_data 
+                            or
+                        homeworks_previous_data['date_updated'] != homework['date_updated'])
+
+    if status_is_changed:
+        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+ 
+
 
 
 def check_tokens()->bool:
     """Check required env params: PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID"""
-    return bool(PRACTICUM_TOKEN) and bool(TELEGRAM_TOKEN) and bool(TELEGRAM_CHAT_ID)
-
+    result = True
+    tokens = {
+        'PRACTICUM_TOKEN':PRACTICUM_TOKEN,
+        'TELEGRAM_TOKEN':TELEGRAM_TOKEN,
+        'TELEGRAM_CHAT_ID':TELEGRAM_CHAT_ID
+    }
+    for name, value in tokens.items():
+        if not value:
+            logger.critical(f'Token {name} is not set')
+            result = False
+    return result
 
 def main():
     """Основная логика работы бота."""
-    logger = init_logger(logging.INFO)
+    logger = init_logger(logging.DEBUG)
 
     if check_tokens():
-        logger.info("Tokens check ok")
+        logger.info('Tokens are loaded')
+        init_telegram_logger(logging.ERROR)
     else:
         logger.critical("Tokens is not set. Bot is stopped")
         return
@@ -119,18 +170,16 @@ def main():
         logging.error(f'Bot init error:{error}')
         return
 
-    send_message(bot,"Test")
-    logger.critical("TTTT")
-    current_timestamp = int(time.time())
-    return
+    timestamp = int(time.time())
 
     while True:
         try:
-            params={'from_date': 0}
-            # response = 
-
-            current_timestamp = int(time.time())
-            pprint(response.json())
+            response = get_api_answer(timestamp)
+            homeworks = check_response(response)
+            if homeworks:
+                send_message(bot,check_response(homeworks))
+            
+            timestamp = response.get('date_updated',timestamp)
             time.sleep(RETRY_TIME)
 
         except Exception as error:
