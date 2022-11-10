@@ -181,7 +181,7 @@ def check_tokens() -> bool:
 
 
 def start(update: Update, context: CallbackContext):
-    """Starting command callback"""
+    """Starting command callback."""
     logger.info('Starting to check the status of homework')
     send_message(context.bot, "Starting to check the status of homework")
     context.job_queue.run_repeating(check_homeworks,
@@ -190,7 +190,7 @@ def start(update: Update, context: CallbackContext):
 
 
 def check_homeworks(context: CallbackContext):
-    """Main check homeworks status function"""
+    """Main check homeworks status function."""
     global last_update_timestamp
     try:
         response = get_api_answer(last_update_timestamp)
@@ -206,7 +206,7 @@ def check_homeworks(context: CallbackContext):
 
 
 def stop(update: Update, context: CallbackContext):
-    """Stoping command callback"""
+    """Stoping command callback."""
     context.job_queue.stop()
 
 
