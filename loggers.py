@@ -4,6 +4,8 @@ import os
 
 
 class TelegramBotLogger(logging.Handler):
+    """Non repeating logger, which sends error log messages from given bot"""
+    """to the given chat"""
     def __init__(self, level: int, bot: Bot, chat_id) -> None:
         super().__init__(level)
         self.bot = bot

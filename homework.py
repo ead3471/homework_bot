@@ -1,18 +1,21 @@
+from datetime import datetime
 from dotenv import load_dotenv
 import os
 from telegram import Bot, TelegramError
+from telegram.update import Update
+from telegram.ext.callbackcontext import CallbackContext
 import time
 import requests
 import logging
 from exceptions import (BadAPIHttpResponseCode,
                         APIRequestProcessingError,
                         APIError,
-                        BadAPIResponseFormat,
-                        UncknownError)
+                        BadAPIResponseFormat)
 from loggers import TelegramBotLogger
 from http import HTTPStatus
 from json import JSONDecodeError
 from schema import Schema, SchemaError
+from telegram.ext import Updater, CommandHandler
 
 load_dotenv()
 
@@ -20,8 +23,11 @@ PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+LOG_LEVEL = os.getenv('LOG_LEVEL') or logging.INFO
+TELEGRAM_LOG_LEVEL = os.getenv('TELEGRAM_LOG_LEVEL') or logging.ERROR
 
-RETRY_TIME = 5
+
+RETRY_TIME = 10
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -36,7 +42,7 @@ HOMEWORK_STATUSES = {
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-homeworks_previous_data = {}
+last_update_timestamp = int(time.time())
 
 
 def init_logger(logging_level: int) -> logging.Logger:
@@ -55,7 +61,7 @@ def init_logger(logging_level: int) -> logging.Logger:
 
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
-    return logger
+    logger.info(f"Log inited. Logging level={logging_level}")
 
 
 def init_telegram_logger(logging_level):
@@ -67,6 +73,7 @@ def init_telegram_logger(logging_level):
                                         TELEGRAM_CHAT_ID)
     telegram_logger.setFormatter(formatter)
     logger.addHandler(telegram_logger)
+    logger.info(f"Telegram Log inited. Logging level={logging_level}")
 
 
 def send_message(bot: Bot, message: str):
@@ -82,34 +89,38 @@ def send_message(bot: Bot, message: str):
 def get_api_answer(current_timestamp: int = None) -> dict:
     """Get homework status info."""
     timestamp = current_timestamp or int(time.time())
-    logger.info(f"Process request to yandex API. timestamp={timestamp}")
     params = {'from_date': timestamp}
+    timestamp_str = datetime.fromtimestamp(timestamp)
     try:
+        logger.info(
+            ("Sending request to yandex API. "
+             f"timestamp={timestamp}({timestamp_str})"))
         response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-        logger.info('Data recieved')
+        logger.info(f'Data received:{response.json()}')
         if response.status_code == HTTPStatus.OK:
             result = response.json()
             if 'error' in result:
                 raise APIError(f"Error at API response: {result.get('error')}")
         else:
-            raise BadAPIHttpResponseCode(("Bad response code from"
-                                         f"yandex API:{response.status_code}"))
+            raise BadAPIHttpResponseCode(
+                ("Bad response code from"
+                 f"yandex API recieved:{response.status_code}"))
     except requests.exceptions.RequestException as error:
         raise APIRequestProcessingError(f"Process request error:{error}")
     except JSONDecodeError or ValueError as error:
         raise BadAPIResponseFormat(f'API response format error:{error}')
-    except Exception as error:
-        raise UncknownError(f'Uncknown error:{error}')
     return result
 
 
 def check_response(response: dict) -> list:
     """Check and validate response from API."""
+    logger.info("Checking the received data")
+
     if type(response) is not dict:
-        raise TypeError("Response is not a dict")
+        raise TypeError(f"Response is not a dict:{type(response)}")
 
     if 'current_date' not in response or 'homeworks' not in response:
-        raise BadAPIResponseFormat(("Response should contain 'current_date'"
+        raise BadAPIResponseFormat(("Response must contain 'current_date'"
                                    " and 'homeworks' keys"))
 
     if type(response['homeworks']) is not list:
@@ -118,6 +129,7 @@ def check_response(response: dict) -> list:
     raw_homeworks = response['homeworks']
     homeworks = []
     if raw_homeworks:
+        logger.info(f'Recieved data contain {len(raw_homeworks)} records.')
         schema = Schema({'date_updated': str,
                         'homework_name': str,
                          'id': int,
@@ -131,26 +143,30 @@ def check_response(response: dict) -> list:
                 schema.is_valid(homework)
                 homeworks.append(homework)
             except SchemaError as error:
-                logger.error(f'Wrong homework data format:{error}')
+                logger.error(
+                    f'Wrong homework data format:{error} at {homework}')
+        logger.info(f'The resulting list contains {len(homeworks)} items')
         return homeworks
+    else:
+        logger.info('Response homworks list is empty')
 
 
-def parse_status(homework: dict) -> str:
-    """Pasrse API repsponse and return given homewtork status."""
+def parse_status(homework: str) -> str:
+    """Pasrse API repsponse and return given homework status."""
+    logger.info(f"Parse homework status for {homework}")
     homework_name = homework['homework_name']
     homework_status = homework['status']
     verdict = HOMEWORK_STATUSES[homework_status]
 
-    status_is_changed = (homework_name not in homeworks_previous_data
-                         or (homeworks_previous_data['date_updated']
-                             != homework['date_updated']))
-
-    if status_is_changed:
-        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+    logger.info((f"{homework_name} status is changed! "
+                f"New status is '{homework['status']}',"
+                 f" updated at {homework['date_updated']})"))
+    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def check_tokens() -> bool:
     """Check required env params."""
+    logger.info("Tokens checking")
     result = True
     tokens = {
         'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
@@ -164,37 +180,52 @@ def check_tokens() -> bool:
     return result
 
 
+def start(update: Update, context: CallbackContext):
+    logger.info('Starting to check the status of homework')
+    send_message(context.bot, "Starting to check the status of homework")
+    context.job_queue.run_repeating(check_homeworks,
+                                    RETRY_TIME,
+                                    context=update.message.chat_id)
+
+
+def check_homeworks(context: CallbackContext):
+    global last_update_timestamp
+    try:
+        response = get_api_answer(last_update_timestamp)
+        homeworks = check_response(response)
+        if homeworks:
+            for homework in homeworks:
+                send_message(context.bot, parse_status(homework))
+
+        last_update_timestamp = response.get('current_date',
+                                             last_update_timestamp)
+    except Exception as error:
+        logger.exception(f'Failed to retrieve homework status data: {error}')
+
+
+def stop(update: Update, context: CallbackContext):
+    context.job_queue.stop()
+
+
 def main():
     """Основная логика работы бота."""
-    logger = init_logger(logging.DEBUG)
+    init_logger(LOG_LEVEL)
 
     if check_tokens():
-        logger.info('Tokens are loaded')
-        init_telegram_logger(logging.ERROR)
+        logger.info('Tokens check completed')
+        init_telegram_logger(TELEGRAM_LOG_LEVEL)
     else:
-        logger.critical("Tokens is not set. Bot is stopped")
+        logger.critical("Tokens are not set. The bot is stopped")
         return
 
     try:
-        bot = Bot(token=TELEGRAM_TOKEN)
-    except Exception as error:
-        logging.critical(f'Bot init error:{error}')
-        return
-
-    timestamp = int(time.time())
-
-    while True:
-        try:
-            response = get_api_answer(timestamp)
-            homeworks = check_response(response)
-            if homeworks:
-                send_message(bot, check_response(homeworks))
-
-            timestamp = response.get('date_updated', timestamp)
-        except Exception as error:
-            logging.error(f'Сбой в работе программы: {error}')
-        finally:
-            time.sleep(RETRY_TIME)
+        updater = Updater(TELEGRAM_TOKEN, use_context=True)
+        updater.dispatcher.add_handler(CommandHandler('start', start))
+        updater.dispatcher.add_handler(CommandHandler('stop', stop))
+        updater.start_polling()
+        updater.idle()
+    except Exception as exception:
+        logger.critical(f"Error at bot startup:{exception}")
 
 
 if __name__ == '__main__':
