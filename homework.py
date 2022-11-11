@@ -25,7 +25,13 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 LOG_LEVEL = os.getenv('LOG_LEVEL') or logging.INFO
 TELEGRAM_LOG_LEVEL = os.getenv('TELEGRAM_LOG_LEVEL') or logging.ERROR
-
+HOMEWORK_INFO_SCHEMA: Schema = Schema({'date_updated': str,
+                                       'homework_name': str,
+                                       'id': int,
+                                       'lesson_name': int,
+                                       'reviewer_comment': str,
+                                       'status': str
+                                       })
 
 RETRY_TIME = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
@@ -130,17 +136,10 @@ def check_response(response: dict) -> list:
     homeworks = []
     if raw_homeworks:
         logger.info(f'Recieved data contain {len(raw_homeworks)} records.')
-        schema = Schema({'date_updated': str,
-                        'homework_name': str,
-                         'id': int,
-                         'lesson_name': int,
-                         'reviewer_comment': str,
-                         'status': str
-                         })
 
         for homework in raw_homeworks:
             try:
-                schema.is_valid(homework)
+                HOMEWORK_INFO_SCHEMA.is_valid(homework)
                 homeworks.append(homework)
             except SchemaError as error:
                 logger.error(
